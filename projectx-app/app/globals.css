@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap');
+
+:root {
+  --font-display: 'Bebas Neue';
+  --font-body: 'DM Sans';
+  --font-mono: 'DM Mono';
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background-color: #0A0A0A;
+  color: #F5F5F0;
+  font-family: var(--font-body), sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Utility: Phase color badges */
+.phase-buildup   { background: #1a3a2a; color: #3DBF6E; }
+.phase-output    { background: #3a1a1a; color: #D94F3D; }
+.phase-mound     { background: #1a1a3a; color: #4D7FD9; }
+.phase-bullpen   { background: #2a1a3a; color: #9B6DD4; }
+.phase-inseason  { background: #3a2a1a; color: #E8C547; }
