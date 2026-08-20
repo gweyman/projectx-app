@@ -1,0 +1,1183 @@
+- Add Supabase client (lib/supabase.js)
+- Add login page: sign in/up, inline error messages, remember-me
+- Onboarding: save intake to profiles table on submit, kick off
+  program build, then redirect to /dashboard after 'You're locked in'
+- Add lib/buildProgram.js: maps intake answers to the algorithm
+  engine's generateWeekSchedule() to produce the first week
+- Dashboard: auth guard, polls profiles.program_ready every 2.5s
+  (60s timeout) with a loading state, renders real profile/program
+  data once ready
+- Root page now redirects to /dashboard or /login based on session
+- DB: added profiles.program (jsonb) and profiles.program_ready
+  (bool, default false) columns via Supabase migration
+---
+ app/dashboard/page.js  | 257 +++++++++++++++++++++++++-----------
+ app/globals.css        |   4 +
+ app/login/page.js      | 143 ++++++++++++++++++++
+ app/onboarding/page.js |  78 ++++++++++-
+ app/page.js            | 290 +++--------------------------------------
+ lib/buildProgram.js    |  71 ++++++++++
+ lib/supabase.js        |  11 ++
+ package-lock.json      | 114 +++++++++++++++-
+ package.json           |   3 +-
+ 9 files changed, 610 insertions(+), 361 deletions(-)
+ create mode 100644 app/login/page.js
+ create mode 100644 lib/buildProgram.js
+ create mode 100644 lib/supabase.js
+
+diff --git a/app/dashboard/page.js b/app/dashboard/page.js
+index ddf42c3..012fd10 100644
+--- a/app/dashboard/page.js
++++ b/app/dashboard/page.js
+@@ -1,27 +1,9 @@
+ 'use client';
+ 
+-import { useState } from 'react';
++import { useEffect, useRef, useState } from 'react';
++import { useRouter } from 'next/navigation';
+ import Link from 'next/link';
+-
+-const ATHLETE = {
+-  name: 'Gavin',
+-  phase: 'buildup',
+-  weekInPhase: 2,
+-  velocity: 84,
+-  lastSoreness: 2,
+-};
+-
+-const WEEK = [
+-  { day: 'MON', date: 'Jun 2',  type: 'moderate',    label: 'Moderate',    status: 'done' },
+-  { day: 'TUE', date: 'Jun 3',  type: 'off',         label: 'Off',         status: 'done' },
+-  { day: 'WED', date: 'Jun 4',  type: 'light_catch', label: 'Light Catch', status: 'today' },
+-  { day: 'THU', date: 'Jun 5',  type: 'off',         label: 'Off',         status: 'upcoming' },
+-  { day: 'FRI', date: 'Jun 6',  type: 'moderate',    label: 'Moderate',    status: 'upcoming' },
+-  { day: 'SAT', date: 'Jun 7',  type: 'off',         label: 'Off',         status: 'upcoming' },
+-  { day: 'SUN', date: 'Jun 8',  type: 'long_toss',   label: 'Long Toss',   status: 'upcoming' },
+-];
+-
+-const TODAY = WEEK.find(d => d.status === 'today');
++import { supabase } from '../../lib/supabase';
+ 
+ const PHASE_COLORS = {
+   buildup:     { bg: '#0d2b1a', accent: '#22c55e', label: 'Build-Up' },
+@@ -32,74 +14,184 @@ const PHASE_COLORS = {
+ };
+ 
+ const TYPE_COLORS = {
+-  moderate:              '#3b82f6',
+-  light_catch:           '#22c55e',
+-  long_toss:             '#f59e0b',
+-  high_intent_plus:      '#ef4444',
+-  high_intent_plus_plus: '#ec4899',
+-  recovery:              '#6366f1',
+-  off:                   '#2a2a2a',
+-  bullpen:               '#a855f7',
+-  deload:                '#6b7280',
++  moderate: '#3b82f6', moderate_prep: '#3b82f6', moderate_midslope: '#3b82f6',
++  light_catch: '#22c55e', long_toss: '#f59e0b',
++  high_intent_plus: '#ef4444', high_intent_plus_plus: '#ec4899',
++  recovery: '#6366f1', off: '#2a2a2a', bullpen: '#a855f7',
++  deload: '#6b7280', game: '#e03d2d',
+ };
+ 
+-function sorenessColor(n) {
+-  if (n <= 3) return '#22c55e';
+-  if (n <= 6) return '#f59e0b';
+-  return '#ef4444';
++function label(dayType) {
++  return dayType.split('_').map(w => w[0].toUpperCase() + w.slice(1)).join(' ');
++}
++
++function shortDay(dateStr) {
++  return new Date(dateStr).toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase();
++}
++function shortDate(dateStr) {
++  return new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
++}
++function isSameDay(a, b) {
++  const da = new Date(a), db = new Date(b);
++  return da.toDateString() === db.toDateString();
+ }
+ 
++const POLL_INTERVAL_MS = 2500;
++const POLL_TIMEOUT_MS = 60000;
++
+ export default function DashboardPage() {
+-  const phase = PHASE_COLORS[ATHLETE.phase] || PHASE_COLORS.buildup;
+-  const todayColor = TODAY ? (TYPE_COLORS[TODAY.type] || '#444') : '#444';
+-  const isThrowingDay = TODAY && TODAY.type !== 'off';
++  const router = useRouter();
++  const [status, setStatus] = useState('checking'); // checking | building | ready | no-profile | timed-out | error
++  const [profile, setProfile] = useState(null);
++  const pollStart = useRef(null);
++
++  useEffect(() => {
++    let cancelled = false;
++    let pollTimer = null;
++
++    async function loadProfile() {
++      const { data: userData } = await supabase.auth.getUser();
++      const user = userData.user;
++      if (!user) {
++        router.push('/login');
++        return;
++      }
++
++      const { data: row, error } = await supabase
++        .from('profiles')
++        .select('*')
++        .eq('id', user.id)
++        .maybeSingle();
++
++      if (cancelled) return;
++
++      if (error) {
++        setStatus('error');
++        return;
++      }
++      if (!row) {
++        setStatus('no-profile');
++        return;
++      }
++
++      setProfile(row);
++
++      if (row.program_ready) {
++        setStatus('ready');
++        return;
++      }
++
++      // Program not built yet — start polling.
++      setStatus('building');
++      pollStart.current = pollStart.current || Date.now();
++      pollTimer = setInterval(async () => {
++        if (Date.now() - pollStart.current > POLL_TIMEOUT_MS) {
++          clearInterval(pollTimer);
++          if (!cancelled) setStatus('timed-out');
++          return;
++        }
++        const { data: refreshed } = await supabase
++          .from('profiles')
++          .select('*')
++          .eq('id', user.id)
++          .maybeSingle();
++        if (cancelled) return;
++        if (refreshed?.program_ready) {
++          clearInterval(pollTimer);
++          setProfile(refreshed);
++          setStatus('ready');
++        }
++      }, POLL_INTERVAL_MS);
++    }
++
++    loadProfile();
++    return () => { cancelled = true; if (pollTimer) clearInterval(pollTimer); };
++  }, [router]);
++
++  if (status === 'checking') return <Shell><Centered>Loading…</Centered></Shell>;
++
++  if (status === 'no-profile') {
++    return (
++      <Shell>
++        <Centered>
++          <div style={{ marginBottom: '16px' }}>We don't have an intake profile for you yet.</div>
++          <Link href="/onboarding" style={ctaStyle}>Go to Intake Form →</Link>
++        </Centered>
++      </Shell>
++    );
++  }
++
++  if (status === 'error') {
++    return <Shell><Centered>Something went wrong loading your dashboard. Try refreshing.</Centered></Shell>;
++  }
++
++  if (status === 'building') {
++    return (
++      <Shell>
++        <Centered>
++          <div style={{ fontSize: '18px', fontWeight: 800, color: 'white', marginBottom: '10px' }}>
++            Building your program…
++          </div>
++          <div style={{ fontSize: '13px', color: '#666', marginBottom: '24px' }}>
++            This usually only takes a few seconds.
++          </div>
++          <div style={spinnerStyle} />
++        </Centered>
++      </Shell>
++    );
++  }
++
++  if (status === 'timed-out') {
++    return (
++      <Shell>
++        <Centered>
++          <div style={{ marginBottom: '16px' }}>This is taking longer than expected.</div>
++          <button onClick={() => window.location.reload()} style={ctaStyle}>Retry</button>
++        </Centered>
++      </Shell>
++    );
++  }
++
++  // status === 'ready'
++  const program = profile.program || { schedule: [], phase: 'buildup', weekInPhase: 1 };
++  const phase = PHASE_COLORS[program.phase] || PHASE_COLORS.buildup;
++  const today = new Date();
++  const week = program.schedule || [];
++  const todayEntry = week.find(d => isSameDay(d.date, today));
++  const todayColor = todayEntry ? (TYPE_COLORS[todayEntry.dayType] || '#444') : '#444';
++  const isThrowingDay = todayEntry && todayEntry.dayType !== 'off';
++  const name = profile.first_name || 'Athlete';
+ 
+   return (
+     <div style={{ minHeight: '100vh', backgroundColor: '#080808', fontFamily: 'system-ui, sans-serif', color: '#f0f0ec' }}>
+-
+       <nav style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 24px', borderBottom: '1px solid #151515' }}>
+         <span style={{ fontSize: '20px', fontWeight: 900, letterSpacing: '0.08em', color: '#e03d2d' }}>PX</span>
+         <div style={{ display: 'flex', gap: '20px', alignItems: 'center' }}>
+           <span style={{ fontSize: '12px', color: '#444', letterSpacing: '0.05em' }}>DASHBOARD</span>
+           <div style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: '#1a1a1a', border: '1px solid #2a2a2a', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '13px', color: '#666' }}>
+-            {ATHLETE.name[0]}
++            {name[0]}
+           </div>
+         </div>
+       </nav>
+ 
+       <div style={{ maxWidth: '760px', margin: '0 auto', padding: '32px 20px' }}>
+-
+         <div style={{ marginBottom: '32px' }}>
+           <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px', flexWrap: 'wrap' }}>
+-            <h1 style={{ fontSize: '28px', fontWeight: 800, color: 'white', margin: 0 }}>
+-              What's up, {ATHLETE.name}.
+-            </h1>
++            <h1 style={{ fontSize: '28px', fontWeight: 800, color: 'white', margin: 0 }}>What's up, {name}.</h1>
+             <span style={{ padding: '4px 12px', borderRadius: '20px', fontSize: '11px', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', backgroundColor: phase.bg, color: phase.accent, border: `1px solid ${phase.accent}22` }}>
+-              {phase.label} · Week {ATHLETE.weekInPhase}
++              {phase.label} · Week {program.weekInPhase || 1}
+             </span>
+           </div>
+           <p style={{ fontSize: '14px', color: '#555', margin: 0 }}>
+-            Wednesday, June 4 · Last soreness: <span style={{ color: sorenessColor(ATHLETE.lastSoreness), fontWeight: 600 }}>{ATHLETE.lastSoreness}/10</span>
++            {today.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
+           </p>
+         </div>
+ 
+         {isThrowingDay ? (
+           <div style={{ backgroundColor: '#0f0f0f', border: `1px solid ${todayColor}33`, borderLeft: `3px solid ${todayColor}`, borderRadius: '10px', padding: '24px', marginBottom: '24px' }}>
+             <div style={{ fontSize: '10px', letterSpacing: '0.15em', textTransform: 'uppercase', color: '#555', marginBottom: '8px' }}>Today's Session</div>
+-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+-              <div style={{ fontSize: '26px', fontWeight: 900, color: 'white' }}>{TODAY.label}</div>
+-              <div style={{ textAlign: 'right' }}>
+-                <div style={{ fontSize: '10px', color: '#555', marginBottom: '2px' }}>INTENT</div>
+-                <div style={{ fontSize: '24px', fontWeight: 900, color: todayColor }}>60%</div>
+-              </div>
+-            </div>
+-            <div style={{ fontSize: '13px', color: '#666', marginBottom: '20px', fontStyle: 'italic' }}>
+-              "Keep it loose. This is a feel day — prioritize arm health and easy mechanics over distance."
+-            </div>
+-            <Link
+-              href="/session"
+-              style={{ display: 'block', width: '100%', padding: '14px', textAlign: 'center', backgroundColor: todayColor, color: 'white', borderRadius: '8px', textDecoration: 'none', fontSize: '14px', fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', boxSizing: 'border-box' }}
+-            >
++            <div style={{ fontSize: '26px', fontWeight: 900, color: 'white', marginBottom: '20px' }}>{label(todayEntry.dayType)}</div>
++            <Link href="/session" style={{ display: 'block', width: '100%', padding: '14px', textAlign: 'center', backgroundColor: todayColor, color: 'white', borderRadius: '8px', textDecoration: 'none', fontSize: '14px', fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', boxSizing: 'border-box' }}>
+               Start Session →
+             </Link>
+           </div>
+@@ -113,21 +205,20 @@ export default function DashboardPage() {
+ 
+         <div style={{ marginBottom: '24px' }}>
+           <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.15em', textTransform: 'uppercase', color: '#444', marginBottom: '14px' }}>This Week</div>
+-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '6px' }}>
+-            {WEEK.map(d => {
+-              const isToday = d.status === 'today';
+-              const isDone = d.status === 'done';
+-              const isOff = d.type === 'off';
+-              const color = TYPE_COLORS[d.type] || '#444';
++          <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.max(week.length, 1)}, 1fr)`, gap: '6px' }}>
++            {week.map((d, i) => {
++              const isToday = isSameDay(d.date, today);
++              const isPast = new Date(d.date) < today && !isToday;
++              const isOff = d.dayType === 'off';
++              const color = TYPE_COLORS[d.dayType] || '#444';
+               return (
+-                <div key={d.day} style={{ borderRadius: '8px', padding: '10px 6px', textAlign: 'center', backgroundColor: isToday ? '#111' : '#0d0d0d', border: isToday ? `1px solid ${color}55` : '1px solid #151515', opacity: isDone ? 0.45 : 1, position: 'relative' }}>
+-                  <div style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '0.1em', color: isToday ? color : '#444', marginBottom: '6px' }}>{d.day}</div>
++                <div key={i} style={{ borderRadius: '8px', padding: '10px 6px', textAlign: 'center', backgroundColor: isToday ? '#111' : '#0d0d0d', border: isToday ? `1px solid ${color}55` : '1px solid #151515', opacity: isPast ? 0.45 : 1, position: 'relative' }}>
++                  <div style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '0.1em', color: isToday ? color : '#444', marginBottom: '6px' }}>{shortDay(d.date)}</div>
+                   <div style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: isOff ? 'transparent' : color, border: isOff ? '1px solid #2a2a2a' : 'none', margin: '0 auto 6px' }} />
+                   <div style={{ fontSize: '9px', color: isOff ? '#2a2a2a' : isToday ? '#aaa' : '#444', lineHeight: 1.3 }}>
+-                    {isOff ? '—' : d.label.split(' ')[0]}
++                    {isOff ? '—' : label(d.dayType).split(' ')[0]}
+                   </div>
+-                  {isDone && !isOff && <div style={{ position: 'absolute', top: '4px', right: '5px', fontSize: '8px', color: '#22c55e' }}>✓</div>}
+-                  {isToday && <div style={{ position: 'absolute', top: '-1px', left: '50%', transform: 'translateX(-50%)', width: '16px', height: '2px', backgroundColor: color, borderRadius: '1px' }} />}
++                  <div style={{ fontSize: '8px', color: '#333', marginTop: '2px' }}>{shortDate(d.date)}</div>
+                 </div>
+               );
+             })}
+@@ -136,18 +227,30 @@ export default function DashboardPage() {
+ 
+         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px' }}>
+           {[
+-            ['Velocity', `${ATHLETE.velocity} mph`, '#3b82f6'],
++            ['Velocity', profile.velocity ? `${profile.velocity} mph` : '—', '#3b82f6'],
+             ['Phase', phase.label, phase.accent],
+-            ['Last Soreness', `${ATHLETE.lastSoreness}/10`, sorenessColor(ATHLETE.lastSoreness)],
+-          ].map(([label, val, color]) => (
+-            <div key={label} style={{ backgroundColor: '#0d0d0d', border: '1px solid #151515', borderRadius: '8px', padding: '16px' }}>
+-              <div style={{ fontSize: '10px', color: '#444', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: '6px' }}>{label}</div>
++            ['Days/Week', profile.days_per_week || '—', '#f59e0b'],
++          ].map(([lbl, val, color]) => (
++            <div key={lbl} style={{ backgroundColor: '#0d0d0d', border: '1px solid #151515', borderRadius: '8px', padding: '16px' }}>
++              <div style={{ fontSize: '10px', color: '#444', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: '6px' }}>{lbl}</div>
+               <div style={{ fontSize: '18px', fontWeight: 800, color }}>{val}</div>
+             </div>
+           ))}
+         </div>
+-
+       </div>
+     </div>
+   );
+-}
+\ No newline at end of file
++}
++
++function Shell({ children }) {
++  return <div style={{ minHeight: '100vh', backgroundColor: '#080808', fontFamily: 'system-ui, sans-serif', color: '#f0f0ec' }}>{children}</div>;
++}
++function Centered({ children }) {
++  return (
++    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '24px' }}>
++      <div style={{ maxWidth: '360px' }}>{children}</div>
++    </div>
++  );
++}
++const ctaStyle = { display: 'inline-block', padding: '12px 24px', backgroundColor: '#e03d2d', color: 'white', borderRadius: '8px', textDecoration: 'none', fontSize: '13px', fontWeight: 700, letterSpacing: '0.05em', textTransform: 'uppercase', border: 'none', cursor: 'pointer' };
++const spinnerStyle = { width: '32px', height: '32px', border: '3px solid #1a1a1a', borderTopColor: '#3b82f6', borderRadius: '50%', margin: '0 auto', animation: 'spin 0.8s linear infinite' };
+diff --git a/app/globals.css b/app/globals.css
+index fafd206..11c4f8a 100644
+--- a/app/globals.css
++++ b/app/globals.css
+@@ -7,3 +7,7 @@ body {
+   color: #f5f5f0;
+   -webkit-font-smoothing: antialiased;
+ }
++
++@keyframes spin {
++  to { transform: rotate(360deg); }
++}
+diff --git a/app/login/page.js b/app/login/page.js
+new file mode 100644
+index 0000000..23334df
+--- /dev/null
++++ b/app/login/page.js
+@@ -0,0 +1,143 @@
++'use client';
++
++import { useState, useEffect } from 'react';
++import { useRouter } from 'next/navigation';
++import { supabase } from '../../lib/supabase';
++
++const s = {
++  page: { minHeight: '100vh', backgroundColor: '#0a0a0a', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px', fontFamily: 'system-ui, sans-serif' },
++  card: { width: '100%', maxWidth: '380px', backgroundColor: '#0d0d0d', border: '1px solid #1a1a1a', borderRadius: '12px', padding: '32px' },
++  logo: { fontSize: '22px', fontWeight: 900, letterSpacing: '0.08em', color: '#e03d2d', marginBottom: '4px' },
++  title: { fontSize: '20px', fontWeight: 800, color: 'white', marginBottom: '24px' },
++  label: { fontSize: '12px', color: '#888', marginBottom: '6px', display: 'block' },
++  input: { width: '100%', padding: '10px 12px', backgroundColor: '#111', border: '1px solid #2a2a2a', borderRadius: '6px', fontSize: '14px', color: 'white', outline: 'none', boxSizing: 'border-box', marginBottom: '16px' },
++  rememberRow: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '20px' },
++  rememberLabel: { fontSize: '12px', color: '#888', cursor: 'pointer', userSelect: 'none' },
++  btn: { width: '100%', padding: '13px', fontSize: '14px', fontWeight: 800, letterSpacing: '0.05em', textTransform: 'uppercase', backgroundColor: '#e03d2d', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', marginBottom: '12px' },
++  btnDisabled: { opacity: 0.5, cursor: 'not-allowed' },
++  toggle: { textAlign: 'center', fontSize: '13px', color: '#555' },
++  toggleLink: { color: '#3b82f6', cursor: 'pointer', fontWeight: 600 },
++  error: { backgroundColor: '#2a0d0d', border: '1px solid #5a1a1a', borderRadius: '6px', padding: '10px 14px', fontSize: '13px', color: '#f05050', marginBottom: '16px', lineHeight: 1.5 },
++  info: { backgroundColor: '#0d2b1a', border: '1px solid #22c55e33', borderRadius: '6px', padding: '10px 14px', fontSize: '13px', color: '#22c55e', marginBottom: '16px', lineHeight: 1.5 },
++};
++
++const REMEMBER_KEY = 'px_remember_email';
++
++export default function LoginPage() {
++  const router = useRouter();
++  const [mode, setMode] = useState('signin'); // 'signin' | 'signup'
++  const [email, setEmail] = useState('');
++  const [password, setPassword] = useState('');
++  const [remember, setRemember] = useState(false);
++  const [error, setError] = useState('');
++  const [info, setInfo] = useState('');
++  const [loading, setLoading] = useState(false);
++
++  useEffect(() => {
++    const saved = typeof window !== 'undefined' ? localStorage.getItem(REMEMBER_KEY) : null;
++    if (saved) {
++      setEmail(saved);
++      setRemember(true);
++    }
++  }, []);
++
++  async function handleSubmit(e) {
++    e.preventDefault();
++    setError('');
++    setInfo('');
++    if (!email || !password) {
++      setError('Enter both an email and a password.');
++      return;
++    }
++    setLoading(true);
++
++    if (remember) {
++      localStorage.setItem(REMEMBER_KEY, email);
++    } else {
++      localStorage.removeItem(REMEMBER_KEY);
++    }
++
++    if (mode === 'signin') {
++      const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
++      setLoading(false);
++      if (signInError) {
++        setError(signInError.message === 'Invalid login credentials'
++          ? 'Wrong email or password. Double-check and try again.'
++          : signInError.message);
++        return;
++      }
++      router.push('/dashboard');
++    } else {
++      const { error: signUpError } = await supabase.auth.signUp({
++        email,
++        password,
++        options: { emailRedirectTo: `${window.location.origin}/login` },
++      });
++      setLoading(false);
++      if (signUpError) {
++        setError(signUpError.message);
++        return;
++      }
++      setInfo('Check your email to confirm your account, then sign in here.');
++      setMode('signin');
++    }
++  }
++
++  return (
++    <div style={s.page}>
++      <div style={s.card}>
++        <div style={s.logo}>PX</div>
++        <div style={s.title}>{mode === 'signin' ? 'Sign in' : 'Create your account'}</div>
++
++        {error && <div style={s.error}>{error}</div>}
++        {info && <div style={s.info}>{info}</div>}
++
++        <form onSubmit={handleSubmit}>
++          <label style={s.label}>Email</label>
++          <input
++            type="email"
++            value={email}
++            onChange={e => setEmail(e.target.value)}
++            style={s.input}
++            placeholder="you@example.com"
++            autoComplete="email"
++          />
++
++          <label style={s.label}>Password</label>
++          <input
++            type="password"
++            value={password}
++            onChange={e => setPassword(e.target.value)}
++            style={s.input}
++            placeholder="••••••••"
++            autoComplete={mode === 'signin' ? 'current-password' : 'new-password'}
++          />
++
++          {mode === 'signin' && (
++            <div style={s.rememberRow}>
++              <input
++                type="checkbox"
++                id="remember"
++                checked={remember}
++                onChange={e => setRemember(e.target.checked)}
++              />
++              <label htmlFor="remember" style={s.rememberLabel}>Remember my email on this device</label>
++            </div>
++          )}
++
++          <button type="submit" disabled={loading} style={{ ...s.btn, ...(loading ? s.btnDisabled : {}) }}>
++            {loading ? 'Please wait…' : mode === 'signin' ? 'Sign In' : 'Sign Up'}
++          </button>
++        </form>
++
++        <div style={s.toggle}>
++          {mode === 'signin' ? (
++            <>New here? <span style={s.toggleLink} onClick={() => { setMode('signup'); setError(''); setInfo(''); }}>Create an account</span></>
++          ) : (
++            <>Already have an account? <span style={s.toggleLink} onClick={() => { setMode('signin'); setError(''); setInfo(''); }}>Sign in</span></>
++          )}
++        </div>
++      </div>
++    </div>
++  );
++}
+diff --git a/app/onboarding/page.js b/app/onboarding/page.js
+index 26fad79..9919d71 100644
+--- a/app/onboarding/page.js
++++ b/app/onboarding/page.js
+@@ -1,6 +1,9 @@
+ 'use client';
+ 
+-import { useState } from 'react';
++import { useState, useEffect } from 'react';
++import { useRouter } from 'next/navigation';
++import { supabase } from '../../lib/supabase';
++import { buildInitialProgram } from '../../lib/buildProgram';
+ 
+ const s = {
+   page: { minHeight: '100vh', backgroundColor: '#0a0a0a', padding: '40px 16px', fontFamily: 'system-ui, sans-serif' },
+@@ -103,6 +106,74 @@ export default function OnboardingPage() {
+     goal: '', gameDate: '', gamesPerWeek: '', notes: '',
+   });
+   const [submitted, setSubmitted] = useState(false);
++  const [saving, setSaving] = useState(false);
++  const [saveError, setSaveError] = useState('');
++  const router = useRouter();
++
++  useEffect(() => {
++    supabase.auth.getUser().then(({ data }) => {
++      if (!data.user) router.push('/login');
++    });
++  }, [router]);
++
++  async function handleSubmit() {
++    setSaveError('');
++    setSaving(true);
++
++    const { data: userData } = await supabase.auth.getUser();
++    const user = userData.user;
++    if (!user) {
++      setSaving(false);
++      router.push('/login');
++      return;
++    }
++
++    const profileRow = {
++      id: user.id,
++      first_name: form.firstName, last_name: form.lastName,
++      age: form.age ? parseInt(form.age, 10) : null,
++      height: form.height, weight: form.weight, grad_year: form.gradYear,
++      arm: form.arm, position: form.position, level: form.level,
++      velocity: form.velocity, pulldown: form.pulldown, innings: form.innings,
++      shutdown: form.shutdown, long_toss_dist: form.longTossDist,
++      velo_prog: form.veloProg, weight_age: form.weightAge,
++      squat: form.squat ? parseInt(form.squat, 10) : null,
++      bench: form.bench ? parseInt(form.bench, 10) : null,
++      deadlift: form.deadlift ? parseInt(form.deadlift, 10) : null,
++      pullups: form.pullups ? parseInt(form.pullups, 10) : null,
++      arm_health: form.armHealth, injury_history: form.injuryHistory,
++      other_limitations: form.otherLimitations, equipment: form.equipment,
++      days_per_week: form.daysPerWeek, available_days: form.availableDays,
++      goal: form.goal, game_date: form.gameDate,
++      games_per_week: form.gamesPerWeek, notes: form.notes,
++      program_ready: false,
++      updated_at: new Date().toISOString(),
++    };
++
++    const { error: saveErr } = await supabase.from('profiles').upsert(profileRow);
++    if (saveErr) {
++      setSaving(false);
++      setSaveError(saveErr.message);
++      return;
++    }
++
++    setSubmitted(true);
++    setSaving(false);
++
++    // Build the program from the intake data — fast/local for now, but
++    // structured so this can move server-side later without changing
++    // the dashboard's polling contract.
++    try {
++      const program = buildInitialProgram(profileRow);
++      await supabase.from('profiles').update({ program, program_ready: true }).eq('id', user.id);
++    } catch (buildErr) {
++      // Leave program_ready false — dashboard will show a friendly
++      // "still building" state; profile data itself is already saved.
++      console.error('Program build failed:', buildErr);
++    }
++
++    setTimeout(() => router.push('/dashboard'), 1400);
++  }
+ 
+   function setR(name, value) { setForm(f => ({ ...f, [name]: value })); }
+   function togArr(field, value) {
+@@ -367,8 +438,9 @@ export default function OnboardingPage() {
+ 
+         {/* Submit */}
+         <div style={s.submitArea}>
+-          <button type="button" onClick={() => setSubmitted(true)} style={s.submitBtn}>
+-            Submit &amp; Build My Program
++          {saveError && <div style={s.flagNote}>{saveError}</div>}
++          <button type="button" onClick={handleSubmit} disabled={saving} style={{ ...s.submitBtn, opacity: saving ? 0.6 : 1, cursor: saving ? 'not-allowed' : 'pointer' }}>
++            {saving ? 'Saving…' : 'Submit & Build My Program'}
+           </button>
+           <p style={s.submitNote}>Your answers are saved to your profile and used to generate your first week.</p>
+         </div>
+diff --git a/app/page.js b/app/page.js
+index e01a231..677ec93 100644
+--- a/app/page.js
++++ b/app/page.js
+@@ -1,279 +1,21 @@
+ 'use client';
+- 
+-import { useState } from 'react';
+-import Link from 'next/link';
+- 
+-// ── Mock data — will be replaced by real DB data later ──
+-const ATHLETE = {
+-  name: 'Marcus',
+-  phase: 'buildup',
+-  weekInPhase: 2,
+-  velocity: 84,
+-  lastSoreness: 2,
+-};
+- 
+-const WEEK = [
+-  { day: 'MON', date: 'Jun 2',  type: 'moderate',    label: 'Moderate',     intent: 75,  status: 'done' },
+-  { day: 'TUE', date: 'Jun 3',  type: 'off',         label: 'Off',          intent: null, status: 'done' },
+-  { day: 'WED', date: 'Jun 4',  type: 'light_catch', label: 'Light Catch',  intent: 60,  status: 'today' },
+-  { day: 'THU', date: 'Jun 5',  type: 'off',         label: 'Off',          intent: null, status: 'upcoming' },
+-  { day: 'FRI', date: 'Jun 6',  type: 'moderate',    label: 'Moderate',     intent: 75,  status: 'upcoming' },
+-  { day: 'SAT', date: 'Jun 7',  type: 'off',         label: 'Off',          intent: null, status: 'upcoming' },
+-  { day: 'SUN', date: 'Jun 8',  type: 'long_toss',   label: 'Long Toss',    intent: 95,  status: 'upcoming' },
+-];
+- 
+-const TODAY = WEEK.find(d => d.status === 'today');
+- 
+-const SESSION_DETAIL = {
+-  warmup: ['Arm circles — 10 each direction', 'Band pull-aparts — 2×15', 'Wrist flicks at 30 ft — 20 throws'],
+-  targets: { distance: '90–120 ft', intent: '60%', throwCount: '30–40 throws' },
+-  focus: 'Keep it loose. This is a feel day — prioritize arm health and easy mechanics over distance.',
+-  cooldown: ['Band external rotation — 2×15', 'Sleeper stretch — 2×30 sec', 'Ice if any soreness above 3'],
+-};
+- 
+-// ── Color map ──
+-const PHASE_COLORS = {
+-  buildup:   { bg: '#0d2b1a', accent: '#22c55e', label: 'Build-Up' },
+-  output:    { bg: '#2b0d0d', accent: '#ef4444', label: 'Output' },
+-  mound_blend: { bg: '#0d1a2b', accent: '#3b82f6', label: 'Mound Blend' },
+-  bullpen:   { bg: '#1a0d2b', accent: '#a855f7', label: 'Bullpen' },
+-  in_season: { bg: '#2b1f0d', accent: '#f59e0b', label: 'In-Season' },
+-};
+- 
+-const TYPE_COLORS = {
+-  moderate:    '#3b82f6',
+-  light_catch: '#22c55e',
+-  long_toss:   '#f59e0b',
+-  high_intent_plus: '#ef4444',
+-  high_intent_plus_plus: '#ec4899',
+-  recovery:    '#6366f1',
+-  off:         '#333',
+-  bullpen:     '#a855f7',
+-  deload:      '#6b7280',
+-};
+- 
+-const SORENESS_COLOR = (n) => n <= 3 ? '#22c55e' : n <= 6 ? '#f59e0b' : '#ef4444';
+- 
+-export default function DashboardPage() {
+-  const [showSession, setShowSession] = useState(false);
+-  const [sorenessLogged, setSorenessLogged] = useState(false);
+-  const [sorenessVal, setSorenessVal] = useState(null);
+- 
+-  const phase = PHASE_COLORS[ATHLETE.phase] || PHASE_COLORS.buildup;
+- 
++
++import { useEffect } from 'react';
++import { useRouter } from 'next/navigation';
++import { supabase } from '../lib/supabase';
++
++export default function RootPage() {
++  const router = useRouter();
++
++  useEffect(() => {
++    supabase.auth.getUser().then(({ data }) => {
++      router.replace(data.user ? '/dashboard' : '/login');
++    });
++  }, [router]);
++
+   return (
+-    <div style={{ minHeight: '100vh', backgroundColor: '#080808', fontFamily: "'DM Sans', system-ui, sans-serif", color: '#f0f0ec' }}>
+- 
+-      {/* Top nav */}
+-      <nav style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 24px', borderBottom: '1px solid #151515' }}>
+-        <span style={{ fontSize: '20px', fontWeight: 900, letterSpacing: '0.08em', color: '#e03d2d' }}>PX</span>
+-        <div style={{ display: 'flex', gap: '20px', alignItems: 'center' }}>
+-          <span style={{ fontSize: '12px', color: '#444', letterSpacing: '0.05em' }}>DASHBOARD</span>
+-          <div style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: '#1a1a1a', border: '1px solid #2a2a2a', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '13px', color: '#666' }}>
+-            {ATHLETE.name[0]}
+-          </div>
+-        </div>
+-      </nav>
+- 
+-      <div style={{ maxWidth: '760px', margin: '0 auto', padding: '32px 20px' }}>
+- 
+-        {/* Greeting + phase badge */}
+-        <div style={{ marginBottom: '32px' }}>
+-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
+-            <h1 style={{ fontSize: '28px', fontWeight: 800, color: 'white', margin: 0 }}>
+-              What's up, {ATHLETE.name}.
+-            </h1>
+-            <span style={{ padding: '4px 12px', borderRadius: '20px', fontSize: '11px', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', backgroundColor: phase.bg, color: phase.accent, border: `1px solid ${phase.accent}22` }}>
+-              {phase.label} · Week {ATHLETE.weekInPhase}
+-            </span>
+-          </div>
+-          <p style={{ fontSize: '14px', color: '#555', margin: 0 }}>
+-            Wednesday, June 4 · Arm soreness last session: <span style={{ color: SORENESS_COLOR(ATHLETE.lastSoreness), fontWeight: 600 }}>{ATHLETE.lastSoreness}/10</span>
+-          </p>
+-        </div>
+- 
+-        {/* Today's session card */}
+-        {TODAY && TODAY.type !== 'off' && (
+-          <div style={{ backgroundColor: '#0f0f0f', border: `1px solid ${TYPE_COLORS[TODAY.type]}33`, borderLeft: `3px solid ${TYPE_COLORS[TODAY.type]}`, borderRadius: '10px', padding: '24px', marginBottom: '24px' }}>
+-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
+-              <div>
+-                <div style={{ fontSize: '10px', letterSpacing: '0.15em', textTransform: 'uppercase', color: '#555', marginBottom: '6px' }}>Today's Session</div>
+-                <div style={{ fontSize: '26px', fontWeight: 900, color: 'white', letterSpacing: '0.02em' }}>{TODAY.label}</div>
+-              </div>
+-              {TODAY.intent && (
+-                <div style={{ textAlign: 'right' }}>
+-                  <div style={{ fontSize: '10px', letterSpacing: '0.1em', color: '#555', marginBottom: '4px' }}>INTENT</div>
+-                  <div style={{ fontSize: '28px', fontWeight: 900, color: TYPE_COLORS[TODAY.type] }}>{TODAY.intent}%</div>
+-                </div>
+-              )}
+-            </div>
+- 
+-            {/* Session targets */}
+-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px', marginBottom: '20px' }}>
+-              {[
+-                ['Distance', SESSION_DETAIL.targets.distance],
+-                ['Intent', SESSION_DETAIL.targets.intent],
+-                ['Throws', SESSION_DETAIL.targets.throwCount],
+-              ].map(([label, val]) => (
+-                <div key={label} style={{ backgroundColor: '#151515', borderRadius: '8px', padding: '12px 14px' }}>
+-                  <div style={{ fontSize: '10px', color: '#444', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: '4px' }}>{label}</div>
+-                  <div style={{ fontSize: '15px', fontWeight: 700, color: '#ddd' }}>{val}</div>
+-                </div>
+-              ))}
+-            </div>
+- 
+-            {/* Focus note */}
+-            <div style={{ backgroundColor: '#151515', borderRadius: '8px', padding: '14px', marginBottom: '20px', fontSize: '13px', color: '#888', lineHeight: 1.6, fontStyle: 'italic' }}>
+-              "{SESSION_DETAIL.focus}"
+-            </div>
+- 
+-            {/* Expand session detail */}
+-            <button
+-              onClick={() => setShowSession(!showSession)}
+-              style={{ background: 'none', border: '1px solid #2a2a2a', color: '#666', padding: '10px 16px', borderRadius: '6px', fontSize: '12px', cursor: 'pointer', letterSpacing: '0.05em', marginBottom: showSession ? '16px' : '0', width: '100%' }}
+-            >
+-              {showSession ? '▲ Hide session detail' : '▼ View full session detail'}
+-            </button>
+- 
+-            {showSession && (
+-              <div style={{ borderTop: '1px solid #1a1a1a', paddingTop: '16px' }}>
+-                <div style={{ marginBottom: '16px' }}>
+-                  <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.1em', color: '#555', textTransform: 'uppercase', marginBottom: '10px' }}>Warmup</div>
+-                  {SESSION_DETAIL.warmup.map((item, i) => (
+-                    <div key={i} style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', marginBottom: '6px' }}>
+-                      <span style={{ color: TYPE_COLORS[TODAY.type], fontSize: '12px', marginTop: '1px' }}>→</span>
+-                      <span style={{ fontSize: '13px', color: '#888' }}>{item}</span>
+-                    </div>
+-                  ))}
+-                </div>
+-                <div>
+-                  <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.1em', color: '#555', textTransform: 'uppercase', marginBottom: '10px' }}>Cooldown</div>
+-                  {SESSION_DETAIL.cooldown.map((item, i) => (
+-                    <div key={i} style={{ display: 'flex', gap: '10px', alignItems: 'flex-start', marginBottom: '6px' }}>
+-                      <span style={{ color: '#6366f1', fontSize: '12px', marginTop: '1px' }}>→</span>
+-                      <span style={{ fontSize: '13px', color: '#888' }}>{item}</span>
+-                    </div>
+-                  ))}
+-                </div>
+-              </div>
+-            )}
+-          </div>
+-        )}
+- 
+-        {/* Pre-session soreness check */}
+-        {!sorenessLogged && TODAY && TODAY.type !== 'off' && (
+-          <div style={{ backgroundColor: '#0f0f0f', border: '1px solid #1e1e1e', borderRadius: '10px', padding: '24px', marginBottom: '24px' }}>
+-            <div style={{ fontSize: '14px', fontWeight: 600, color: '#ddd', marginBottom: '6px' }}>Before you throw — how's the arm?</div>
+-            <div style={{ fontSize: '12px', color: '#555', marginBottom: '16px' }}>Rate your soreness right now, 1–10.</div>
+-            <div style={{ display: 'flex', gap: '6px', marginBottom: '12px' }}>
+-              {[1,2,3,4,5,6,7,8,9,10].map(n => (
+-                <button
+-                  key={n}
+-                  onClick={() => setSorenessVal(n)}
+-                  style={{
+-                    flex: 1, padding: '10px 0', borderRadius: '6px', border: 'none', cursor: 'pointer', fontSize: '13px', fontWeight: 700, transition: 'all 0.12s',
+-                    backgroundColor: sorenessVal === n ? SORENESS_COLOR(n) : '#1a1a1a',
+-                    color: sorenessVal === n ? 'white' : '#555',
+-                  }}
+-                >
+-                  {n}
+-                </button>
+-              ))}
+-            </div>
+-            {sorenessVal && (
+-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+-                <span style={{ fontSize: '12px', color: SORENESS_COLOR(sorenessVal) }}>
+-                  {sorenessVal <= 3 ? '✓ Good to go — proceed as planned.' : sorenessVal <= 6 ? '⚠ Elevated — session may be adjusted.' : '✗ Too sore — switching to recovery.'}
+-                </span>
+-                <button
+-                  onClick={() => setSorenessLogged(true)}
+-                  style={{ padding: '8px 20px', backgroundColor: '#e03d2d', color: 'white', border: 'none', borderRadius: '6px', fontSize: '12px', fontWeight: 700, cursor: 'pointer', letterSpacing: '0.05em' }}
+-                >
+-                  LOG & START →
+-                </button>
+-              </div>
+-            )}
+-          </div>
+-        )}
+- 
+-        {sorenessLogged && (
+-          <div style={{ backgroundColor: '#0d2b1a', border: '1px solid #22c55e33', borderRadius: '10px', padding: '16px 20px', marginBottom: '24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+-            <span style={{ fontSize: '13px', color: '#22c55e' }}>✓ Soreness logged — you're cleared. Get after it.</span>
+-            <Link href="/session" style={{ padding: '8px 20px', backgroundColor: '#22c55e', color: 'white', borderRadius: '6px', fontSize: '12px', fontWeight: 700, textDecoration: 'none', letterSpacing: '0.05em' }}>
+-              LOG SESSION →
+-            </Link>
+-          </div>
+-        )}
+- 
+-        {/* Weekly schedule */}
+-        <div style={{ marginBottom: '24px' }}>
+-          <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.15em', textTransform: 'uppercase', color: '#444', marginBottom: '14px' }}>This Week</div>
+-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '6px' }}>
+-            {WEEK.map((d) => {
+-              const isToday = d.status === 'today';
+-              const isDone = d.status === 'done';
+-              const isOff = d.type === 'off';
+-              const color = TYPE_COLORS[d.type] || '#444';
+- 
+-              return (
+-                <div key={d.day} style={{
+-                  borderRadius: '8px', padding: '10px 6px', textAlign: 'center',
+-                  backgroundColor: isToday ? '#111' : '#0d0d0d',
+-                  border: isToday ? `1px solid ${color}66` : '1px solid #151515',
+-                  opacity: isDone ? 0.5 : 1,
+-                  position: 'relative',
+-                }}>
+-                  <div style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '0.1em', color: isToday ? color : '#444', marginBottom: '6px' }}>{d.day}</div>
+-                  <div style={{
+-                    width: '8px', height: '8px', borderRadius: '50%',
+-                    backgroundColor: isOff ? '#1a1a1a' : color,
+-                    margin: '0 auto 6px',
+-                    border: isOff ? '1px solid #2a2a2a' : 'none',
+-                  }} />
+-                  <div style={{ fontSize: '9px', color: isOff ? '#2a2a2a' : isToday ? '#aaa' : '#444', lineHeight: 1.3 }}>
+-                    {isOff ? '—' : d.label.split(' ')[0]}
+-                  </div>
+-                  {isDone && !isOff && (
+-                    <div style={{ position: 'absolute', top: '4px', right: '4px', fontSize: '8px', color: '#22c55e' }}>✓</div>
+-                  )}
+-                  {isToday && (
+-                    <div style={{ position: 'absolute', top: '-1px', left: '50%', transform: 'translateX(-50%)', width: '16px', height: '2px', backgroundColor: color, borderRadius: '1px' }} />
+-                  )}
+-                </div>
+-              );
+-            })}
+-          </div>
+-        </div>
+- 
+-        {/* Stats strip */}
+-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px', marginBottom: '24px' }}>
+-          {[
+-            ['Current Velocity', `${ATHLETE.velocity} mph`, '#3b82f6'],
+-            ['Phase', phase.label, phase.accent],
+-            ['Last Soreness', `${ATHLETE.lastSoreness}/10`, SORENESS_COLOR(ATHLETE.lastSoreness)],
+-          ].map(([label, val, color]) => (
+-            <div key={label} style={{ backgroundColor: '#0d0d0d', border: '1px solid #151515', borderRadius: '8px', padding: '16px' }}>
+-              <div style={{ fontSize: '10px', color: '#444', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: '6px' }}>{label}</div>
+-              <div style={{ fontSize: '18px', fontWeight: 800, color }}>{val}</div>
+-            </div>
+-          ))}
+-        </div>
+- 
+-        {/* Quick actions */}
+-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+-          <Link href="/session" style={{ display: 'block', padding: '16px', backgroundColor: '#0d0d0d', border: '1px solid #1a1a1a', borderRadius: '8px', textDecoration: 'none', textAlign: 'center' }}>
+-            <div style={{ fontSize: '18px', marginBottom: '4px' }}>📋</div>
+-            <div style={{ fontSize: '12px', fontWeight: 600, color: '#ddd' }}>Log Session</div>
+-            <div style={{ fontSize: '11px', color: '#444', marginTop: '2px' }}>Post-throw report</div>
+-          </Link>
+-          <button style={{ padding: '16px', backgroundColor: '#0d0d0d', border: '1px solid #1a1a1a', borderRadius: '8px', cursor: 'pointer', textAlign: 'center' }}>
+-            <div style={{ fontSize: '18px', marginBottom: '4px' }}>📅</div>
+-            <div style={{ fontSize: '12px', fontWeight: 600, color: '#ddd' }}>View Schedule</div>
+-            <div style={{ fontSize: '11px', color: '#444', marginTop: '2px' }}>Full program view</div>
+-          </button>
+-        </div>
+- 
+-      </div>
++    <div style={{ minHeight: '100vh', backgroundColor: '#080808', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#666', fontFamily: 'system-ui, sans-serif', fontSize: '13px' }}>
++      Loading…
+     </div>
+   );
+ }
+diff --git a/lib/buildProgram.js b/lib/buildProgram.js
+new file mode 100644
+index 0000000..7d6db3b
+--- /dev/null
++++ b/lib/buildProgram.js
+@@ -0,0 +1,71 @@
++import { PHASES, generateWeekSchedule } from './algorithm';
++
++const DAY_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
++
++function phaseFromGoal(goal) {
++  switch (goal) {
++    case 'In-season maintenance — stay healthy':
++      return PHASES.IN_SEASON;
++    case 'Bullpen development — improve on mound':
++      return PHASES.BULLPEN;
++    case 'Build up arm — ramp-up from time off':
++    case 'Velocity development — add mph':
++    default:
++      return PHASES.BUILDUP;
++  }
++}
++
++function slotsFromDaysPerWeek(daysPerWeek) {
++  const map = {
++    '3 days': 3, '4 days': 4, '5 days': 5, '6 days': 6, '7 days': 7,
++  };
++  return map[daysPerWeek] || 4; // 'It varies' or missing -> default 4
++}
++
++// Build the next N calendar dates, preferring the athlete's selected
++// available days (Mon/Tue/etc). Falls back to the next N days if no
++// days were selected or not enough matches are found in a 2-week window.
++function nextAvailableDates(count, availableDays = []) {
++  const wanted = new Set(availableDays.map(d => DAY_INDEX[d]).filter(d => d !== undefined));
++  const dates = [];
++  const cursor = new Date();
++  cursor.setDate(cursor.getDate() + 1); // start tomorrow
++
++  for (let i = 0; i < 21 && dates.length < count; i++) {
++    const d = new Date(cursor);
++    d.setDate(cursor.getDate() + i);
++    if (wanted.size === 0 || wanted.has(d.getDay())) {
++      dates.push(d);
++    }
++  }
++  return dates.slice(0, count);
++}
++
++/**
++ * Turn a saved intake profile row into an initial week schedule.
++ * This is the "backend build" step that runs right after intake submit.
++ */
++export function buildInitialProgram(profile) {
++  const phase = phaseFromGoal(profile.goal);
++  const availableSlots = slotsFromDaysPerWeek(profile.days_per_week);
++  const availableDates = nextAvailableDates(availableSlots, profile.available_days || []);
++
++  const result = generateWeekSchedule({
++    phase,
++    availableSlots,
++    availableDates,
++  });
++
++  return {
++    phase,
++    weekInPhase: 1,
++    generatedAt: new Date().toISOString(),
++    schedule: result.schedule.map(s => ({
++      date: s.date.toISOString(),
++      dayType: s.dayType,
++    })),
++    valid: result.valid,
++    message: result.message || null,
++    neverDoViolations: result.neverDoViolations || [],
++  };
++}
+diff --git a/lib/supabase.js b/lib/supabase.js
+new file mode 100644
+index 0000000..0d6ab5e
+--- /dev/null
++++ b/lib/supabase.js
+@@ -0,0 +1,11 @@
++import { createClient } from '@supabase/supabase-js';
++
++const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
++const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
++
++export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
++  auth: {
++    persistSession: true,
++    autoRefreshToken: true,
++  },
++});
+diff --git a/package-lock.json b/package-lock.json
+index 97c462b..7a0e4d8 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -8,6 +8,7 @@
+       "name": "projectx-app",
+       "version": "0.1.0",
+       "dependencies": {
++        "@supabase/supabase-js": "^2.45.4",
+         "next": "14.2.3",
+         "react": "^18",
+         "react-dom": "^18"
+@@ -181,6 +182,98 @@
+         "node": ">= 10"
+       }
+     },
++    "node_modules/@supabase/auth-js": {
++      "version": "2.112.3",
++      "resolved": "https://registry.npmjs.org/@supabase/auth-js/-/auth-js-2.112.3.tgz",
++      "integrity": "sha512-NA0rsgAlWZPvbhw8aUdmgfpHVgUAcd8zK5ov43l++o1bLIPXZhRiAlRobhwF5AatQuovpqxsMH50F4oyyV4XZw==",
++      "license": "MIT",
++      "dependencies": {
++        "tslib": "2.8.1"
++      },
++      "engines": {
++        "node": ">=22.0.0"
++      }
++    },
++    "node_modules/@supabase/functions-js": {
++      "version": "2.112.3",
++      "resolved": "https://registry.npmjs.org/@supabase/functions-js/-/functions-js-2.112.3.tgz",
++      "integrity": "sha512-gfv481mTOVWtZIJgXupxZpni2V2UWPf6jeF/jOK7HdMHdH+mt6sU0sHHwf0POsPip8ltlulu9OUHgwVzl5ddRw==",
++      "license": "MIT",
++      "dependencies": {
++        "tslib": "2.8.1"
++      },
++      "engines": {
++        "node": ">=22.0.0"
++      }
++    },
++    "node_modules/@supabase/phoenix": {
++      "version": "0.4.5",
++      "resolved": "https://registry.npmjs.org/@supabase/phoenix/-/phoenix-0.4.5.tgz",
++      "integrity": "sha512-aAn9H9ovVyeApKy11OWOrrOGq8DV68yWeH4ud2lN9fzn4aO8Zb5GLL9m1pUg9nLqIcT+ZDfAcsZe0E/nqdv2lw==",
++      "license": "MIT"
++    },
++    "node_modules/@supabase/postgrest-js": {
++      "version": "2.112.3",
++      "resolved": "https://registry.npmjs.org/@supabase/postgrest-js/-/postgrest-js-2.112.3.tgz",
++      "integrity": "sha512-+Mf6uCpzr00bqxwX8hTK2X2L9eAL/1vuOjdEjx6upz9ulb0RmQT16XeU/JkMUlVHw/B46ZnPa2busY4Kd9YCzw==",
++      "license": "MIT",
++      "dependencies": {
++        "tslib": "2.8.1"
++      },
++      "engines": {
++        "node": ">=22.0.0"
++      }
++    },
++    "node_modules/@supabase/realtime-js": {
++      "version": "2.112.3",
++      "resolved": "https://registry.npmjs.org/@supabase/realtime-js/-/realtime-js-2.112.3.tgz",
++      "integrity": "sha512-E6wljXWs7DUOloyIB69i3YFInWE6IyCvgTAbQ0KYxOHv26FdA1KzEXTuzxrYEdf70t406Z9BRwUlGyclGF2FXA==",
++      "license": "MIT",
++      "dependencies": {
++        "@supabase/phoenix": "0.4.5",
++        "tslib": "2.8.1"
++      },
++      "engines": {
++        "node": ">=22.0.0"
++      }
++    },
++    "node_modules/@supabase/storage-js": {
++      "version": "2.112.3",
++      "resolved": "https://registry.npmjs.org/@supabase/storage-js/-/storage-js-2.112.3.tgz",
++      "integrity": "sha512-oSK61tzlUvg+BWPqpKQCu9qqonsO26btaoAR9D6Gest2aj7xUqToj9rKyaoYOJczkhg9BjqA1REbYy9tPI4bDA==",
++      "license": "MIT",
++      "dependencies": {
++        "iceberg-js": "^0.8.1",
++        "tslib": "2.8.1"
++      },
++      "engines": {
++        "node": ">=22.0.0"
++      }
++    },
++    "node_modules/@supabase/supabase-js": {
++      "version": "2.112.3",
++      "resolved": "https://registry.npmjs.org/@supabase/supabase-js/-/supabase-js-2.112.3.tgz",
++      "integrity": "sha512-Jv1bxVQmEJNkjvPEhFaKjPzsh+Ozyew6lWGD+SoYcsclDEP1z7yEvKvfUQfzy0DkxRIQnZNxmmWtAzw5XLTQoA==",
++      "license": "MIT",
++      "dependencies": {
++        "@supabase/auth-js": "2.112.3",
++        "@supabase/functions-js": "2.112.3",
++        "@supabase/postgrest-js": "2.112.3",
++        "@supabase/realtime-js": "2.112.3",
++        "@supabase/storage-js": "2.112.3"
++      },
++      "engines": {
++        "node": ">=22.0.0"
++      },
++      "peerDependencies": {
++        "@opentelemetry/api": ">=1.0.0"
++      },
++      "peerDependenciesMeta": {
++        "@opentelemetry/api": {
++          "optional": true
++        }
++      }
++    },
+     "node_modules/@swc/helpers": {
+       "version": "0.5.5",
+       "resolved": "https://registry.npmjs.org/@swc/helpers/-/helpers-0.5.5.tgz",
+@@ -197,12 +290,6 @@
+       "integrity": "sha512-e2BR4lsJkkRlKZ/qCHPw9ZaSxc0MVUd7gtbtaB7aMvHeJVYe8sOB8DBZkP2DtISHGSku9sCK6T6cnY0CtXrOCQ==",
+       "license": "Apache-2.0"
+     },
+-    "node_modules/@swc/helpers/node_modules/tslib": {
+-      "version": "2.8.1",
+-      "resolved": "https://registry.npmjs.org/tslib/-/tslib-2.8.1.tgz",
+-      "integrity": "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==",
+-      "license": "0BSD"
+-    },
+     "node_modules/arg": {
+       "version": "5.0.2",
+       "resolved": "https://registry.npmjs.org/arg/-/arg-5.0.2.tgz",
+@@ -750,6 +837,15 @@
+       "integrity": "sha512-RbJ5/jmFcNNCcDV5o9eTnBLJ/HszWV0P73bc+Ff4nS/rJj+YaS6IGyiOL0VoBYX+l1Wrl3k63h/KrH+nhJ0XvQ==",
+       "license": "ISC"
+     },
++    "node_modules/iceberg-js": {
++      "version": "0.8.1",
++      "resolved": "https://registry.npmjs.org/iceberg-js/-/iceberg-js-0.8.1.tgz",
++      "integrity": "sha512-1dhVQZXhcHje7798IVM+xoo/1ZdVfzOMIc8/rgVSijRK38EDqOJoGula9N/8ZI5RD8QTxNQtK/Gozpr+qUqRRA==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=20.0.0"
++      }
++    },
+     "node_modules/is-glob": {
+       "version": "4.0.3",
+       "resolved": "https://registry.npmjs.org/is-glob/-/is-glob-4.0.3.tgz",
+@@ -1669,6 +1765,12 @@
+       "engines": {
+         "node": ">=14.0.0"
+       }
++    },
++    "node_modules/tslib": {
++      "version": "2.8.1",
++      "resolved": "https://registry.npmjs.org/tslib/-/tslib-2.8.1.tgz",
++      "integrity": "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==",
++      "license": "0BSD"
+     }
+   }
+ }
+diff --git a/package.json b/package.json
+index 8dab7e0..40ef808 100644
+--- a/package.json
++++ b/package.json
+@@ -10,7 +10,8 @@
+   "dependencies": {
+     "next": "14.2.3",
+     "react": "^18",
+-    "react-dom": "^18"
++    "react-dom": "^18",
++    "@supabase/supabase-js": "^2.45.4"
+   },
+   "devDependencies": {
+     "tailwindcss": "^3.4.1",
+-- 
+2.43.0
+

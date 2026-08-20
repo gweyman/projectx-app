@@ -1,6 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import { supabase } from '@/lib/supabase/client';
 
 const s = {
   page: { minHeight: '100vh', backgroundColor: '#0a0a0a', padding: '40px 16px', fontFamily: 'system-ui, sans-serif' },
@@ -92,7 +94,48 @@ function SL({ num, title }) {
   );
 }
 
+// Map the form's camelCase keys to the profiles table's snake_case columns.
+function toProfileRow(userId, form) {
+  return {
+    id: userId,
+    first_name: form.firstName || null,
+    last_name: form.lastName || null,
+    age: form.age ? parseInt(form.age, 10) : null,
+    height: form.height || null,
+    weight: form.weight || null,
+    grad_year: form.gradYear || null,
+    arm: form.arm || null,
+    position: form.position || null,
+    level: form.level || null,
+    velocity: form.velocity || null,
+    pulldown: form.pulldown || null,
+    innings: form.innings || null,
+    shutdown: form.shutdown || null,
+    long_toss_dist: form.longTossDist || null,
+    velo_prog: form.veloProg || null,
+    weight_age: form.weightAge || null,
+    squat: form.squat ? parseInt(form.squat, 10) : null,
+    bench: form.bench ? parseInt(form.bench, 10) : null,
+    deadlift: form.deadlift ? parseInt(form.deadlift, 10) : null,
+    pullups: form.pullups ? parseInt(form.pullups, 10) : null,
+    arm_health: form.armHealth || null,
+    injury_history: form.injuryHistory || null,
+    other_limitations: form.otherLimitations || null,
+    equipment: form.equipment || [],
+    days_per_week: form.daysPerWeek || null,
+    available_days: form.availableDays || [],
+    goal: form.goal || null,
+    game_date: form.gameDate || null,
+    games_per_week: form.gamesPerWeek || null,
+    notes: form.notes || null,
+  };
+}
+
 export default function OnboardingPage() {
+  const router = useRouter();
+  const [checkingAuth, setCheckingAuth] = useState(true);
+  const [userId, setUserId] = useState(null);
+
   const [form, setForm] = useState({
     firstName: '', lastName: '', age: '', height: '', weight: '', gradYear: '',
     arm: '', position: '', level: '',
@@ -103,6 +146,20 @@ export default function OnboardingPage() {
     goal: '', gameDate: '', gamesPerWeek: '', notes: '',
   });
   const [submitted, setSubmitted] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
+
+  // Auth guard: bounce to /login if there's no signed-in user.
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!session) {
+        router.push('/login');
+        return;
+      }
+      setUserId(session.user.id);
+      setCheckingAuth(false);
+    });
+  }, [router]);
 
   function setR(name, value) { setForm(f => ({ ...f, [name]: value })); }
   function togArr(field, value) {
@@ -117,6 +174,28 @@ export default function OnboardingPage() {
   const pct = Math.round((filled / required.length) * 100);
 
   const injured = form.armHealth === 'Dealing with something — managed' || form.armHealth === 'Coming back from injury';
+
+  async function handleSubmit() {
+    if (!userId) return;
+    setSubmitError('');
+    setSubmitting(true);
+    const row = toProfileRow(userId, form);
+    const { error } = await supabase.from('profiles').upsert(row);
+    setSubmitting(false);
+    if (error) {
+      setSubmitError(error.message);
+      return;
+    }
+    setSubmitted(true);
+  }
+
+  if (checkingAuth) {
+    return (
+      <div style={s.success}>
+        <div style={{ color: '#666', fontSize: '14px' }}>Loading…</div>
+      </div>
+    );
+  }
 
   if (submitted) {
     return (
@@ -367,8 +446,14 @@ export default function OnboardingPage() {
 
         {/* Submit */}
         <div style={s.submitArea}>
-          <button type="button" onClick={() => setSubmitted(true)} style={s.submitBtn}>
-            Submit &amp; Build My Program
+          {submitError && <div style={s.flagNote}>Couldn't save your profile: {submitError}</div>}
+          <button
+            type="button"
+            onClick={handleSubmit}
+            disabled={submitting}
+            style={{ ...s.submitBtn, opacity: submitting ? 0.6 : 1, cursor: submitting ? 'not-allowed' : 'pointer' }}
+          >
+            {submitting ? 'Saving…' : 'Submit & Build My Program'}
           </button>
           <p style={s.submitNote}>Your answers are saved to your profile and used to generate your first week.</p>
         </div>

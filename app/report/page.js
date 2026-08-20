@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
+import NavBar from '../components/NavBar';
 
 function sorenessColor(n) {
   if (!n) return '#333';
@@ -76,12 +77,7 @@ export default function ReportPage() {
 
   return (
     <div style={{ minHeight: '100vh', backgroundColor: '#080808', fontFamily: 'system-ui, sans-serif', color: '#f0f0ec', paddingBottom: '60px' }}>
-      <nav style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 24px', borderBottom: '1px solid #151515' }}>
-        <Link href="/session" style={{ fontSize: '12px', color: '#444', textDecoration: 'none' }}>← Back</Link>
-        <span style={{ fontSize: '20px', fontWeight: 900, letterSpacing: '0.08em', color: '#e03d2d' }}>PX</span>
-        <span style={{ fontSize: '11px', color: '#333', letterSpacing: '0.1em' }}>SESSION REPORT</span>
-      </nav>
-
+      <NavBar />
       <div style={{ maxWidth: '600px', margin: '0 auto', padding: '32px 20px' }}>
         <h1 style={{ fontSize: '28px', fontWeight: 900, color: 'white', marginBottom: '4px' }}>Session Report</h1>
         <p style={{ fontSize: '13px', color: '#555', marginBottom: '32px' }}>Wednesday, June 4 · Light Catch · 60% intent</p>

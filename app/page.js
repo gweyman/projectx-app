@@ -1,11 +1,13 @@
 'use client';
  
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { supabase } from '@/lib/supabase/client.js';
  
 // ── Mock data — will be replaced by real DB data later ──
 const ATHLETE = {
-  name: 'Marcus',
+  name: 'Gavin',
   phase: 'buildup',
   weekInPhase: 2,
   velocity: 84,
@@ -55,12 +57,36 @@ const TYPE_COLORS = {
 const SORENESS_COLOR = (n) => n <= 3 ? '#22c55e' : n <= 6 ? '#f59e0b' : '#ef4444';
  
 export default function DashboardPage() {
+  const router = useRouter();
+  const [checkingAuth, setCheckingAuth] = useState(true);
   const [showSession, setShowSession] = useState(false);
   const [sorenessLogged, setSorenessLogged] = useState(false);
   const [sorenessVal, setSorenessVal] = useState(null);
- 
+
+  // Auth guard: bounce to /login if there's no signed-in user.
+  // NOTE: this only checks that *someone* is logged in — it still shows
+  // mock ATHLETE/WEEK data below. Pulling the real profile + program from
+  // Supabase/the algorithm is the next phase of work, not part of this pass.
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!session) {
+        router.push('/login');
+        return;
+      }
+      setCheckingAuth(false);
+    });
+  }, [router]);
+
   const phase = PHASE_COLORS[ATHLETE.phase] || PHASE_COLORS.buildup;
- 
+
+  if (checkingAuth) {
+    return (
+      <div style={{ minHeight: '100vh', backgroundColor: '#080808', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#666', fontSize: '14px', fontFamily: "'DM Sans', system-ui, sans-serif" }}>
+        Loading…
+      </div>
+    );
+  }
+
   return (
     <div style={{ minHeight: '100vh', backgroundColor: '#080808', fontFamily: "'DM Sans', system-ui, sans-serif", color: '#f0f0ec' }}>
  

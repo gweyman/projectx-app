@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import NavBar from '../components/NavBar';
 
 const SESSION = {
   type: 'light_catch',
@@ -34,13 +35,8 @@ const color = '#22c55e';
 
 export default function SessionPage() {
   return (
-    <div style={{ minHeight: '100vh', backgroundColor: '#080808', fontFamily: 'system-ui, sans-serif', color: '#f0f0ec', paddingBottom: '60px' }}>
-      <nav style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 24px', borderBottom: '1px solid #151515' }}>
-        <Link href="/dashboard" style={{ fontSize: '12px', color: '#444', textDecoration: 'none' }}>← Dashboard</Link>
-        <span style={{ fontSize: '20px', fontWeight: 900, letterSpacing: '0.08em', color: '#e03d2d' }}>PX</span>
-        <span style={{ fontSize: '11px', color: '#333', letterSpacing: '0.1em' }}>TODAY</span>
-      </nav>
-
+    <div style={{ minHeight: '100vh', backgroundColor: '#121212', fontFamily: 'system-ui, sans-serif', color: '#f0f0ec', paddingBottom: '60px' }}>
+      <NavBar />
       <div style={{ maxWidth: '600px', margin: '0 auto', padding: '32px 20px' }}>
         <div style={{ marginBottom: '32px' }}>
           <div style={{ fontSize: '11px', color: '#444', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: '8px' }}>{SESSION.date}</div>
