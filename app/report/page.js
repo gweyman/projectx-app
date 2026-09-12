@@ -1,20 +1,25 @@
 'use client';
 
+import { useRequireAuth } from '@/lib/hooks/useRequireAuth';
+// inside the component, before the existing return:
+const { loading } = useRequireAuth();
+if (loading) return null;
+
 import { useState } from 'react';
 import Link from 'next/link';
 
 function sorenessColor(n) {
   if (!n) return '#333';
-  if (n <= 3) return '#22c55e';
-  if (n <= 6) return '#f59e0b';
-  return '#ef4444';
+  if (n <= 3) return '#436436';
+  if (n <= 6) return '#F6C819';
+  return '#040303';
 }
 
 function rpeColor(n) {
   if (!n) return '#333';
-  if (n <= 4) return '#3b82f6';
-  if (n <= 7) return '#f59e0b';
-  return '#ef4444';
+  if (n <= 4) return '#436436';
+  if (n <= 7) return '#F6C819';
+  return '#040303';
 }
 
 function ScaleBtn({ n, selected, color, onClick }) {
@@ -59,7 +64,7 @@ export default function ReportPage() {
 
   if (submitted) {
     return (
-      <div style={{ minHeight: '100vh', backgroundColor: '#080808', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px', fontFamily: 'system-ui, sans-serif' }}>
+      <div style={{ minHeight: '100vh', backgroundColor: '#0c0c0c', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px', fontFamily: 'system-ui, sans-serif' }}>
         <div style={{ textAlign: 'center', maxWidth: '400px' }}>
           <div style={{ width: '64px', height: '64px', borderRadius: '50%', backgroundColor: flagged ? '#7c2020' : '#14532d', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 20px', fontSize: '24px' }}>{flagged ? '⚠' : '✓'}</div>
           <div style={{ fontSize: '32px', fontWeight: 900, color: 'white', letterSpacing: '0.04em', marginBottom: '12px' }}>SESSION LOGGED.</div>
@@ -75,7 +80,7 @@ export default function ReportPage() {
   }
 
   return (
-    <div style={{ minHeight: '100vh', backgroundColor: '#080808', fontFamily: 'system-ui, sans-serif', color: '#f0f0ec', paddingBottom: '60px' }}>
+    <div style={{ minHeight: '100vh', backgroundColor: '#0c0c0c', fontFamily: 'system-ui, sans-serif', color: '#f0f0ec', paddingBottom: '60px' }}>
       <nav style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 24px', borderBottom: '1px solid #151515' }}>
         <Link href="/session" style={{ fontSize: '12px', color: '#444', textDecoration: 'none' }}>← Back</Link>
         <span style={{ fontSize: '20px', fontWeight: 900, letterSpacing: '0.08em', color: '#e03d2d' }}>PX</span>
