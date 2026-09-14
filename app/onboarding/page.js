@@ -1,6 +1,8 @@
 'use client';
 
 import { useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { supabase } from '@/lib/supabaseClient';
 
 const s = {
   page: { minHeight: '100vh', backgroundColor: '#0a0a0a', padding: '40px 16px', fontFamily: 'system-ui, sans-serif' },
@@ -30,6 +32,7 @@ const s = {
   submitBtn: { width: '100%', padding: '16px', fontSize: '16px', fontWeight: 900, letterSpacing: '0.1em', textTransform: 'uppercase', backgroundColor: '#3b82f6', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer' },
   submitNote: { fontSize: '11px', color: '#444', textAlign: 'center', marginTop: '10px' },
   flagNote: { marginTop: '10px', padding: '10px 14px', backgroundColor: '#2a1a00', border: '1px solid #5a3a00', borderRadius: '6px', fontSize: '12px', color: '#f0a020', lineHeight: 1.5 },
+  errorNote: { marginTop: '16px', padding: '12px 16px', backgroundColor: '#2b0d0d', border: '1px solid #5a1a1a', borderRadius: '6px', fontSize: '12px', color: '#ef4444', lineHeight: 1.5 },
   success: { minHeight: '100vh', backgroundColor: '#0a0a0a', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px' },
   successInner: { textAlign: 'center', maxWidth: '400px' },
   successIcon: { width: '64px', height: '64px', borderRadius: '50%', backgroundColor: '#16a34a', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 20px', fontSize: '24px', color: 'white' },
@@ -93,6 +96,8 @@ function SL({ num, title }) {
 }
 
 export default function OnboardingPage() {
+  const router = useRouter();
+
   const [form, setForm] = useState({
     firstName: '', lastName: '', age: '', height: '', weight: '', gradYear: '',
     arm: '', position: '', level: '',
@@ -102,6 +107,15 @@ export default function OnboardingPage() {
     equipment: [], daysPerWeek: '', availableDays: [],
     goal: '', gameDate: '', gamesPerWeek: '', notes: '',
   });
+
+  // Account fields are tracked separately from the athletic questionnaire —
+  // they map to auth.users, not profiles, and need their own validation.
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState(null);
   const [submitted, setSubmitted] = useState(false);
 
   function setR(name, value) { setForm(f => ({ ...f, [name]: value })); }
@@ -118,13 +132,114 @@ export default function OnboardingPage() {
 
   const injured = form.armHealth === 'Dealing with something — managed' || form.armHealth === 'Coming back from injury';
 
+  async function handleSubmit() {
+    setSubmitError(null);
+
+    // --- Account validation ---
+    if (!email.trim() || !password) {
+      setSubmitError('Email and password are required to create your account.');
+      return;
+    }
+    if (password.length < 8) {
+      setSubmitError('Password must be at least 8 characters.');
+      return;
+    }
+    if (password !== confirmPassword) {
+      setSubmitError('Passwords do not match.');
+      return;
+    }
+
+    setSubmitting(true);
+
+    // --- Create the account ---
+    const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+      email: email.trim(),
+      password,
+    });
+
+    if (signUpError) {
+      setSubmitting(false);
+      setSubmitError(
+        signUpError.message.toLowerCase().includes('already registered')
+          ? 'An account with this email already exists. Try logging in instead.'
+          : signUpError.message
+      );
+      return;
+    }
+
+    const userId = signUpData?.user?.id;
+    const hasSession = !!signUpData?.session;
+
+    if (!userId || !hasSession) {
+      // This means "Confirm email" is still required in Supabase Auth settings.
+      // Product decision was: sign the athlete in immediately, verify in the
+      // background — so this branch should not normally trigger in production.
+      setSubmitting(false);
+      setSubmitError(
+        'Your account was created, but you need to confirm your email before continuing. ' +
+        'Check your inbox for a confirmation link, then come back and log in.'
+      );
+      return;
+    }
+
+    // --- Save the questionnaire answers to the auto-created profile row ---
+    const { error: profileError } = await supabase
+      .from('profiles')
+      .update({
+        first_name: form.firstName || null,
+        last_name: form.lastName || null,
+        age: form.age ? parseInt(form.age, 10) : null,
+        height: form.height || null,
+        weight: form.weight || null,
+        grad_year: form.gradYear || null,
+        arm: form.arm || null,
+        position: form.position || null,
+        level: form.level || null,
+        velocity: form.velocity || null,
+        pulldown: form.pulldown || null,
+        innings: form.innings || null,
+        shutdown: form.shutdown || null,
+        long_toss_dist: form.longTossDist || null,
+        velo_prog: form.veloProg || null,
+        weight_age: form.weightAge || null,
+        squat: form.squat ? parseInt(form.squat, 10) : null,
+        bench: form.bench ? parseInt(form.bench, 10) : null,
+        deadlift: form.deadlift ? parseInt(form.deadlift, 10) : null,
+        pullups: form.pullups ? parseInt(form.pullups, 10) : null,
+        arm_health: form.armHealth || null,
+        injury_history: form.injuryHistory || null,
+        other_limitations: form.otherLimitations || null,
+        equipment: form.equipment,
+        days_per_week: form.daysPerWeek || null,
+        available_days: form.availableDays,
+        goal: form.goal || null,
+        game_date: form.gameDate || null,
+        games_per_week: form.gamesPerWeek || null,
+        notes: form.notes || null,
+      })
+      .eq('id', userId);
+
+    setSubmitting(false);
+
+    if (profileError) {
+      setSubmitError(
+        'Your account was created, but saving your answers failed: ' + profileError.message +
+        ' — try submitting again; your login already works.'
+      );
+      return;
+    }
+
+    setSubmitted(true);
+    setTimeout(() => router.push('/dashboard'), 1800);
+  }
+
   if (submitted) {
     return (
       <div style={s.success}>
         <div style={s.successInner}>
           <div style={s.successIcon}>✓</div>
           <div style={s.successTitle}>YOU'RE LOCKED IN.</div>
-          <p style={s.successSub}>Your profile is set. Your first week of training will be ready shortly — check the Today screen to get started.</p>
+          <p style={s.successSub}>Your profile is set. Taking you to your dashboard now...</p>
         </div>
       </div>
     );
@@ -333,7 +448,7 @@ export default function OnboardingPage() {
           </div>
 
           {/* Section 6 */}
-          <div style={{ ...s.section, borderBottom: 'none' }}>
+          <div style={s.section}>
             <SL num="06" title="Program Goal & Timeline" />
 
             <div style={s.qitem}>
@@ -363,14 +478,37 @@ export default function OnboardingPage() {
               <textarea placeholder="Personal goals, concerns, previous program frustrations..." value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} style={{ ...s.textarea, minHeight: '100px' }} />
             </div>
           </div>
+
+          {/* Section 7 — Account creation, folded into the end of onboarding */}
+          <div style={{ ...s.section, borderBottom: 'none' }}>
+            <SL num="07" title="Create Your Account" />
+            <div style={s.hint}>This is what you'll use to log back in and see your program.</div>
+
+            <div style={s.grid2}>
+              <div style={s.qitem}>
+                <div style={s.fieldLabel}>Email <span style={{ color: '#e03d2d' }}>*</span></div>
+                <input type="email" autoComplete="email" placeholder="you@email.com" value={email} onChange={e => setEmail(e.target.value)} style={s.input} />
+              </div>
+              <div />
+              <div style={s.qitem}>
+                <div style={s.fieldLabel}>Password <span style={{ color: '#e03d2d' }}>*</span></div>
+                <input type="password" autoComplete="new-password" placeholder="8+ characters" value={password} onChange={e => setPassword(e.target.value)} style={s.input} />
+              </div>
+              <div style={s.qitem}>
+                <div style={s.fieldLabel}>Confirm Password <span style={{ color: '#e03d2d' }}>*</span></div>
+                <input type="password" autoComplete="new-password" placeholder="Re-enter password" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} style={s.input} />
+              </div>
+            </div>
+          </div>
         </div>
 
         {/* Submit */}
         <div style={s.submitArea}>
-          <button type="button" onClick={() => setSubmitted(true)} style={s.submitBtn}>
-            Submit &amp; Build My Program
+          <button type="button" onClick={handleSubmit} disabled={submitting} style={{ ...s.submitBtn, cursor: submitting ? 'not-allowed' : 'pointer', opacity: submitting ? 0.6 : 1 }}>
+            {submitting ? 'Creating Your Account…' : 'Submit & Build My Program'}
           </button>
           <p style={s.submitNote}>Your answers are saved to your profile and used to generate your first week.</p>
+          {submitError && <div style={s.errorNote}>{submitError}</div>}
         </div>
 
       </div>
