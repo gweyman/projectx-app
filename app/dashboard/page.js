@@ -1,16 +1,9 @@
 'use client';
 
 import { useRequireAuth } from '@/lib/hooks/useRequireAuth';
+import { TYPE_COLORS, sorenessColor, getPhaseColor, getSessionTypeColor } from '@/lib/colors';
 import { useState } from 'react';
 import Link from 'next/link';
-
-const customColors = {
-  primary: '#060606',      // Dark gray
-  secondary: '#c1292e',    // Red
-  accent: '#1b98e0',       // Blue
-  dark: '#ffffff',         // White (text)
-  light: '#3C3C3C',        // Dark gray (background)
-};
 
 const ATHLETE = {
   name: 'Gavin',
@@ -19,38 +12,6 @@ const ATHLETE = {
   velocity: 84,
   lastSoreness: 2,
 };
-
-const TYPE_COLORS = {
-  moderate: '#1b98e0',
-  light_catch: '#c1292e',
-  long_toss: '#404040',
-  high_intent_plus: '#1b98e0',
-  high_intent_plus_plus: '#c1292e',
-  recovery: '#404040',
-  off: '#666',
-  bullpen: '#1b98e0',
-  deload: '#404040',
-};
-
-function sorenessColor(n) {
-  if (!n) return '#333';
-  if (n <= 3) return '#1b98e0';
-  if (n <= 6) return '#c1292e';
-  return '#404040';
-}
-
-function getPhaseColor(phase) {
-  const phaseColors = {
-    buildup: { accent: '#1b98e0', bg: '#1a2838', label: 'Buildup' },
-    output: { accent: '#c1292e', bg: '#381a1a', label: 'Output' },
-    mound_blend: { accent: '#404040', bg: '#2a2a2a', label: 'Mound Blend' },
-  };
-  return phaseColors[phase] || phaseColors.buildup;
-}
-
-function getSessionTypeColor(type) {
-  return TYPE_COLORS[type] || '#444';
-}
 
 const WEEK = [
   { day: 'MON', date: 'Jun 2',  type: 'moderate',    label: 'Moderate',    status: 'done' },

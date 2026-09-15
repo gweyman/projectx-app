@@ -1,22 +1,9 @@
 'use client';
 
 import { useRequireAuth } from '@/lib/hooks/useRequireAuth';
+import { sorenessColor, rpeColor } from '@/lib/colors';
 import { useState } from 'react';
 import Link from 'next/link';
-
-function sorenessColor(n) {
-  if (!n) return '#333';
-  if (n <= 3) return '#436436';
-  if (n <= 6) return '#F6C819';
-  return '#040303';
-}
-
-function rpeColor(n) {
-  if (!n) return '#333';
-  if (n <= 4) return '#436436';
-  if (n <= 7) return '#F6C819';
-  return '#040303';
-}
 
 function ScaleBtn({ n, selected, color, onClick }) {
   return (
