@@ -2,7 +2,8 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { supabase } from '@/lib/supabaseClient';
+import { createClient } from '@/lib/supabase/client';
+import { generateInitialPlan } from '@/lib/planGenerator';
 
 const s = {
   page: { minHeight: '100vh', backgroundColor: '#0a0a0a', padding: '40px 16px', fontFamily: 'system-ui, sans-serif' },
@@ -97,6 +98,7 @@ function SL({ num, title }) {
 
 export default function OnboardingPage() {
   const router = useRouter();
+  const supabase = createClient();
 
   const [form, setForm] = useState({
     firstName: '', lastName: '', age: '', height: '', weight: '', gradYear: '',
@@ -221,13 +223,22 @@ export default function OnboardingPage() {
 
     setSubmitting(false);
 
-    if (profileError) {
-      setSubmitError(
-        'Your account was created, but saving your answers failed: ' + profileError.message +
-        ' — try submitting again; your login already works.'
-      );
-      return;
-    }
+    try {
+      await generateInitialPlan(supabase, userId, {
+       days_per_week: form.daysPerWeek,
+       velocity: form.velocity,
+       pulldown: form.pulldown,
+     });
+  } catch (planError) {
+    // Profile saved, but no plan yet. Safe state — middleware keeps them
+    // on /onboarding since program_ready is still false. They just need
+   // to submit again.
+    setSubmitError(
+      "Your info was saved, but we couldn't build your plan yet. Please try submitting again."
+    );
+    setSubmitting(false);
+    return;
+  }
 
     setSubmitted(true);
     setTimeout(() => router.push('/dashboard'), 1800);
