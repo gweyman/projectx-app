@@ -3,10 +3,12 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { supabase } from '@/lib/supabaseClient';
+import { createClient } from '@/lib/supabase/client';
+const supabase = createClient();
 
 export default function LoginPage() {
   const router = useRouter();
+  const supabase = createClient();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState(null);
@@ -33,6 +35,7 @@ export default function LoginPage() {
       return;
     }
 
+    router.push('/dashboard');
     router.refresh();
   }
 
@@ -85,7 +88,7 @@ export default function LoginPage() {
         </form>
 
         <p style={{ textAlign: 'center', fontSize: '12px', color: '#444', marginTop: '20px' }}>
-          Don&apos;t have an account? <Link href="/login" style={{ color: '#e03d2d' }}>Get started</Link>
+          Don&apos;t have an account? <Link href="/onboarding" style={{ color: '#e03d2d' }}>Get started</Link>
         </p>
       </div>
     </div>

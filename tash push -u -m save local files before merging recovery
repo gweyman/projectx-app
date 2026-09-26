@@ -1,0 +1,14 @@
+[1mdiff --git a/jsconfig.json b/jsconfig.json[m
+[1mnew file mode 100644[m
+[1mindex 0000000..9c33383[m
+[1m--- /dev/null[m
+[1m+++ b/jsconfig.json[m
+[36m@@ -0,0 +1,8 @@[m
+[32m+[m[32m{[m
+[32m+[m[32m  "compilerOptions": {[m
+[32m+[m[32m    "baseUrl": ".",[m
+[32m+[m[32m    "paths": {[m
+[32m+[m[32m      "@/*": ["./*"][m
+[32m+[m[32m    }[m
+[32m+[m[32m  }[m
+[32m+[m[32m}[m

@@ -160,6 +160,7 @@ export default function OnboardingPage() {
     });
 
     if (signUpError) {
+      console.log("SUPABASE SIGNUP ERROR:", signUpError);
       setSubmitting(false);
       setSubmitError(
         signUpError.message.toLowerCase().includes('already registered')
@@ -220,6 +221,12 @@ export default function OnboardingPage() {
         notes: form.notes || null,
       })
       .eq('id', userId);
+
+    if (profileError) {
+      setSubmitting(false);
+      setSubmitError(`Your account was created, but we couldn't save your profile: ${profileError.message}`);
+      return;
+    }
 
     setSubmitting(false);
 

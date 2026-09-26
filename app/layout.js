@@ -8,7 +8,7 @@ const montserrat = Montserrat({
 });
 
 export const metadata = {
-  title: 'Project X',
+  title: 'TRO',
   description: 'Intelligent arm development for throwers.',
 };
 
