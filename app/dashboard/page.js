@@ -27,11 +27,11 @@ const TODAY = WEEK.find(d => d.status === 'today');
 
 export default function DashboardPage() {
   const { loading } = useRequireAuth();
-  if (loading) return null;
-
   const [showSession, setShowSession] = useState(false);
   const [sorenessLogged, setSorenessLogged] = useState(false);
   const [sorenessVal, setSorenessVal] = useState(null);
+
+  if (loading) return null;
 
   const phase = getPhaseColor(ATHLETE.phase);
   const todayColor = TODAY ? getSessionTypeColor(TODAY.type) : '#444';
