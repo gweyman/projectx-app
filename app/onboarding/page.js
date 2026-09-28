@@ -170,18 +170,36 @@ export default function OnboardingPage() {
       return;
     }
 
-    const userId = signUpData?.user?.id;
-    const hasSession = !!signUpData?.session;
+    let userId = signUpData?.user?.id;
+    let hasSession = !!signUpData?.session;
 
-    if (!userId || !hasSession) {
-      // This means "Confirm email" is still required in Supabase Auth settings.
-      // Product decision was: sign the athlete in immediately, verify in the
-      // background — so this branch should not normally trigger in production.
+    if (!hasSession) {
+      // signUp() didn't hand back a session — normally means "Confirm email" is
+      // on, or this is a re-signup of an unconfirmed address. Product decision
+      // is immediate sign-in with background verification, so fall back to an
+      // explicit sign-in instead of dead-ending the athlete on a "check your
+      // email" message they shouldn't ever have to see.
+      const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password,
+      });
+
+      if (signInError || !signInData?.session) {
+        setSubmitting(false);
+        setSubmitError(
+          'Your account was created, but you need to confirm your email before continuing. ' +
+          'Check your inbox for a confirmation link, then come back and log in.'
+        );
+        return;
+      }
+
+      userId = signInData.user.id;
+      hasSession = true;
+    }
+
+    if (!userId) {
       setSubmitting(false);
-      setSubmitError(
-        'Your account was created, but you need to confirm your email before continuing. ' +
-        'Check your inbox for a confirmation link, then come back and log in.'
-      );
+      setSubmitError('Something went wrong creating your account. Please try again.');
       return;
     }
 
